@@ -13,7 +13,7 @@ setup(
     author='Guido Tack',
     author_email='guido.tack@monash.edu',
     packages=['iminizinc'],
-    install_requires=['ipython'],
+    install_requires=['ipython', 'minizinc'],
     include_package_data=True,
     classifiers=[
         'Development Status :: 4 - Beta',
@@ -21,13 +21,13 @@ setup(
         'Intended Audience :: Developers',
         'Intended Audience :: Education',
         'Intended Audience :: Science/Research',
-        
+
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
         'Topic :: Scientific/Engineering :: Mathematics',
-        
+
         'License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)',
         'Operating System :: OS Independent',
-        
+
         # Specify the Python versions you support here. In particular, ensure
         # that you indicate whether you support Python 2, Python 3 or both.
         'Programming Language :: Python :: 2',

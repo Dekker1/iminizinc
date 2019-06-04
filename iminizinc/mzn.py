@@ -1,23 +1,10 @@
 from __future__ import print_function
 
-import json
-import os
-import re
-import subprocess
+import minizinc
 
+from datetime import timedelta
 from IPython.core import magic_arguments
 from IPython.core.magic import (Magics, magics_class, cell_magic, line_cell_magic)
-from IPython.utils.tempdir import TemporaryDirectory
-
-Solns2outArgs = [
-    "--unsat-msg", "% The problem is infeasible",
-    "--unbounded-msg", "",
-    "--unsatorunbnd-msg", "",
-    "--unknown-msg", "% No solution has been found",
-    "--search-complete-msg", "",
-    "--solution-comma", ",",
-    "--soln-separator", ""
-]
 
 MznModels = {}
 
@@ -26,12 +13,6 @@ MznModels = {}
 class MznMagics(Magics):
 
     @magic_arguments.magic_arguments()
-    @magic_arguments.argument(
-        '-v',
-        '--verbose',
-        action='store_true',
-        help='Verbose output'
-    )
     @magic_arguments.argument(
         '-s',
         '--statistics',
@@ -78,114 +59,67 @@ class MznMagics(Magics):
     @line_cell_magic
     def minizinc(self, line, cell=None):
         """MiniZinc magic"""
-        mzn_proc = ["minizinc"]
 
+        # Parse cell magic flags
         args = magic_arguments.parse_argstring(self.minizinc, line)
-        if args.solver != "":
-            mzn_proc.extend(["--solver", args.solver])
-        else:
+        if args.solver == "":
             print("No solver given")
             return
+        try:
+            solver = minizinc.Solver.lookup(args.solver)
+        except:
+            print("Solver not found")
+            return
 
-        mzn_test = mzn_proc[:]
-        if args.verbose:
-            mzn_proc.append("-v")
-        if args.statistics:
-            mzn_proc.append("-s")
+        all_solutions = True if args.all_solutions else False
+        time_limit = timedelta(milliseconds=args.time_limit) if args.time_limit else None
 
-        if args.statistics:
-            mzn_proc.append("-s")
-        if args.all_solutions:
-            mzn_proc.append("-a")
+        # Setup instance
+        instance = minizinc.Instance(solver)
+        for m in args.model:
+            mzn = MznModels.get(m)
+            if mzn is not None:
+                args.model.remove(m)
+                instance.add_string(mzn)
+        if cell is not None:
+            instance.add_string(cell)
 
-        if args.time_limit:
-            mzn_proc.append("--time-limit")
-            mzn_proc.append(str(args.time_limit))
+        # Get required variables from the IPython environment
+        errors = []
+        for var in instance.input:
+            if var in self.shell.user_ns.keys():
+                instance[var] = self.shell.user_ns[var]
+            else:
+                errors.append("Variable " + var + " is undefined")
+        if len(errors) > 0:
+            print("\n".join(errors))
+            return
 
-        my_env = os.environ.copy()
+        # Solve MiniZinc instance
+        try:
+            result = instance.solve(timeout=time_limit, all_solutions=all_solutions)
+        except minizinc.MiniZincError as err:
+            print("An error occurred:\n%s" % err.message)
+            return
 
-        with TemporaryDirectory() as tmpdir:
-            with open(tmpdir + "/model.mzn", "w") as modelf:
-                for m in args.model:
-                    mzn = MznModels.get(m)
-                    if mzn is not None:
-                        args.model.remove(m)
-                        modelf.write(mzn)
-                if cell is not None:
-                    modelf.write(cell)
-                modelf.close()
-                pipes = subprocess.Popen(
-                    mzn_test + ["--model-interface-only", tmpdir + "/model.mzn"] + args.model + args.data,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=my_env)
-                (output, erroutput) = pipes.communicate()
-                if pipes.returncode != 0:
-                    print(erroutput.rstrip().decode())
-                    return
-                model_ifc = json.loads(output)
-                errors = []
-                bindings = {}
-                for var in model_ifc["input"]:
-                    if var in self.shell.user_ns.keys():
-                        bindings[var] = self.shell.user_ns[var]
-                    else:
-                        errors.append("Variable " + var + " is undefined")
-                if len(errors) > 0:
-                    print("\n".join(errors))
-                    return
-                else:
-                    jsondata = []
-                    if len(bindings) != 0:
-                        with open(tmpdir + "/data.json", "w") as dataf:
-                            json.dump(bindings, dataf)
-                        dataf.close()
-                        jsondata = [tmpdir + "/data.json"]
-                    pipes = subprocess.Popen(mzn_proc
-                                             + ["--output-mode", "json", tmpdir + "/model.mzn"]
-                                             + args.model + Solns2outArgs
-                                             + jsondata + args.data,
-                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=my_env)
-                    (mznoutput, erroutput) = pipes.communicate()
-                    if pipes.returncode != 0:
-                        print("Error in MiniZinc:\n" + erroutput.decode())
-                        return
-                    if len(erroutput) != 0:
-                        print(erroutput.rstrip().decode())
-                    # Remove comments from output
-                    cleanoutput = []
-                    commentsoutput = []
-                    for l in mznoutput.decode().splitlines():
-                        comment = re.search(r"^\s*%+\s*(.*)", l)
-                        if comment:
-                            commentsoutput.append(comment.group(1))
-                        else:
-                            cleanoutput.append(l)
-                    solutions = json.loads("[" + "".join(cleanoutput) + "]")
-                    if len(commentsoutput) > 0:
-                        print("Solver output:")
-                        print("\n".join(commentsoutput))
-                    if args.solution_mode == "return":
-                        if args.all_solutions:
-                            return solutions
-                        else:
-                            if len(solutions) == 0:
-                                return None
-                            else:
-                                return solutions[-1]
-                    else:
-                        if len(solutions) == 0:
-                            print("No solutions found")
-                            return None
-                        else:
-                            solution = solutions[-1]
-                            for var in solution:
-                                self.shell.user_ns[var] = solution[var]
-                                if args.verbose:
-                                    print(var + "=" + str(solution[var]))
-                    return
-
-        # print("Full access to the main IPython object:", self.shell)
-        # print("Variables in the user namespace:", list(self.shell.user_ns.keys()))
-        return
+        # Process solutions
+        if args.solution_mode == "return":
+            if len(result) == 0:
+                return None
+            else:
+                # TODO: Return direct result item (needs proper output first)
+                if all_solutions:
+                    return [ sol.assignments for sol in result._solutions ]
+                return result._solutions[-1].assignments
+        else:
+            if len(result) == 0:
+                print("No solutions found")
+                return None
+            else:
+                solution = result._solutions[-1].assignments  # TODO: Iterate over result item (needs proper iterator first)
+                for var in solution:
+                    self.shell.user_ns[var] = solution[var]
+                    print(var + "=" + str(solution[var]))
 
     @cell_magic
     def mzn_model(self, line, cell):
@@ -202,17 +136,7 @@ class MznMagics(Magics):
 
 
 def check_minizinc():
-    try:
-        pipes = subprocess.Popen(["minizinc", "--version"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        (output, erroutput) = pipes.communicate()
-        if pipes.returncode != 0:
-            print("Error while initialising extension: cannot run minizinc. Make sure it is on the PATH when you run "
-                  "the Jupyter server.")
-            return False
-        print(output.rstrip().decode())
-    except OSError as _:
-        print("Error while initialising extension: cannot run minizinc. Make sure it is on the PATH when you run the "
-              "Jupyter server.")
+    if minizinc.default_driver is None:
         return False
+    print(minizinc.default_driver.minizinc_version)
     return True
